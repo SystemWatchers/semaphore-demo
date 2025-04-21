@@ -1,0 +1,30 @@
+---
+- name: Update Rocky Linux server and reboot if needed
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Ensure dnf cache is up to date
+      dnf:
+        update_cache: yes
+
+    - name: Perform a full system upgrade
+      dnf:
+        name: '*'
+        state: latest
+        autoremove: yes
+
+    - name: Check if a reboot is required (based on existence of /run/reboot-required or rpm changes)
+      command: needs-restarting -r
+      register: reboot_check
+      ignore_errors: yes
+      changed_when: reboot_check.rc == 1
+
+    - name: Reboot the server if required
+      reboot:
+        msg: "Rebooting due to system updates"
+        connect_timeout: 5
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+      when: reboot_check.rc == 1
