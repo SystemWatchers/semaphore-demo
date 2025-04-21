@@ -12,6 +12,11 @@
       dnf:
         name: '*'
         state: latest
+
+    - name: Autoremove unused packages
+      dnf:
+        name: '*'
+        state: absent
         autoremove: yes
 
     - name: Check if a reboot is required (based on existence of /run/reboot-required or rpm changes)
