@@ -1,0 +1,44 @@
+---
+- name: Update SLES server and reboot if needed
+  hosts: all
+  become: true
+  become_user: root
+  tasks:
+
+    - name: Ensure zypper is available
+      package:
+        name: zypper
+        state: present
+
+    - name: Ensure zypper cache is up to date
+      command: zypper refresh
+      register: refresh_result
+      changed_when: refresh_result.rc == 0
+
+    - name: Perform a full system upgrade
+      zypper:
+        name: '*'
+        state: latest
+        update_cache: yes
+
+    - name: Check if a reboot is required (based on kernel or systemd updates)
+      shell: |
+        if zypper info -t package kernel | grep "Installed:" | grep -qE '([0-9]+\.[0-9]+)'; then
+          echo "Reboot needed"
+        fi
+      register: reboot_check
+      ignore_errors: yes
+      changed_when: reboot_check.stdout == "Reboot needed"
+
+    - name: Set reboot flag if required
+      set_fact:
+        reboot_required: "{{ reboot_check.stdout == 'Reboot needed' }}"
+
+    - name: Reboot the server if required
+      reboot:
+        msg: "Rebooting due to system updates"
+        connect_timeout: 5
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+      when: reboot_required
