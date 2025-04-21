@@ -23,7 +23,10 @@
       command: needs-restarting -r
       register: reboot_check
       ignore_errors: yes
-      changed_when: reboot_check.rc == 1
+
+    - name: Set reboot flag if required
+      set_fact:
+        reboot_required: "{{ reboot_check.rc == 1 }}"
 
     - name: Reboot the server if required
       reboot:
@@ -32,4 +35,4 @@
         reboot_timeout: 600
         pre_reboot_delay: 0
         post_reboot_delay: 30
-      when: reboot_check.rc == 1
+      when: reboot_required
