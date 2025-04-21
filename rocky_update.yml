@@ -5,6 +5,11 @@
   become_user: root
   tasks:
 
+    - name: Ensure dnf-utils is installed
+      dnf:
+        name: dnf-utils
+        state: present
+
     - name: Ensure dnf cache is up to date
       dnf:
         update_cache: yes
