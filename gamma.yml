@@ -22,8 +22,8 @@
 
     - name: Fail if not reachable
       fail:
-        msg: "Host {{ inventory_hostname }} is not reachable."
-      when: ping_result.unreachable
+        msg: "Host {{ inventory_hostname }} is not reachable"
+      when: ping_result.failed  # Corrected line
 
   tasks:
     - name: Stop services before patching
