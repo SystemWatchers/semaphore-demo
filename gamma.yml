@@ -22,7 +22,7 @@
         msg: "Host {{ inventory_hostname }} is not reachable"
       when: ping_result.failed
 
-    - name: Check if a reboot is required (more robust check)
+    - name: Check if a reboot is required (more robust check) before patching
       shell: |
         needs_reboot=$(needs-restarting -r || echo "")
         if [[ ! -z "$needs_reboot" ]]; then
@@ -43,16 +43,23 @@
     - name: Stop services before patching
       debug:
         msg: "STOPPING SAP services before patching..."
-      when: reboot_required
-      
+      when: reboot_required # Note: This stops services only if a reboot was required *before* patching
+
     - name: Stop services before patching
       shell: "{{ script_base_dir }}/stopVAR.sh"
       loop: "{{ services_to_manage }}"
       register: stopped_services
       ignore_errors: true
-      when: reboot_required
+      when: reboot_required # Note: This stops services only if a reboot was required *before* patching
 
   tasks:
+    # NOTE: The conditions below (when: reboot_required) mean the upgrade
+    # only runs if a reboot was required *before* patching. This might
+    # not be the intended logic. Usually, you'd run the upgrade
+    # unconditionally or based on a different variable/condition.
+    # However, keeping it as per the original playbook structure for now,
+    # focusing on the patches_exist error fix.
+
     - name: Ensure zypper is available
       package:
         name: zypper
@@ -82,16 +89,16 @@
       register: final_reboot_check
       changed_when: final_reboot_check.stdout | trim == "Reboot required"
       ignore_errors: true
-      when: patches_exist
+      # FIX: Removed 'when: patches_exist'. This check should run after the upgrade.
 
     - name: Set reboot fact if required (after upgrade)
       set_fact:
-        reboot_required: "{{ reboot_required or final_reboot_check.changed }}" # Combine
+        reboot_required: "{{ reboot_required or final_reboot_check.changed }}" # Combine initial and final check results
 
     - name: Display final reboot status
       debug:
         msg: "Reboot required after upgrade: {{ reboot_required }}"
-      when: patches_exist
+      when: reboot_required # FIX: Changed 'when: patches_exist' to 'when: reboot_required'. Display status if reboot is needed.
 
     - name: Reboot the server if required
       reboot:
@@ -104,7 +111,7 @@
       debug:
         msg: "STARTING SAP services after reboot/patching..."
       when: not reboot_required or (reboot_required and reboot_result.changed)
-      
+
     - name: Start services after reboot (or if no reboot was needed)
       shell: "{{ script_base_dir }}/startVAR.sh"
       loop: "{{ services_to_manage }}"
