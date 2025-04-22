@@ -5,6 +5,7 @@
   become_user: root
 
   vars:
+    services_to_manage: [] # Removed serviceA, serviceB, and serviceC
     script_base_dir: "/root/scripts"  # Define the base directory for your scripts
 
   pre_tasks:
