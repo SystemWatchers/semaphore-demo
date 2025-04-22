@@ -5,10 +5,6 @@
   become_user: root
 
   vars:
-    services_to_manage:
-      - serviceA
-      - serviceB
-      - serviceC
     script_base_dir: "/root/scripts"  # Define the base directory for your scripts
 
   pre_tasks:
