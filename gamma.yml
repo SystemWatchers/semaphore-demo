@@ -1,17 +1,25 @@
 ---
-- name: Update SLES server, manage services, and reboot if needed
+- name: Update SLES server, manage services, patch, reboot, and check SAP
   hosts: all
   become: true
   become_user: root
 
   vars:
-    services_to_manage: []
+    services_to_manage: [] # Define your services here, e.g., ['sap', 'database']
     script_base_dir: "/root/scripts"
+    # Ports to check for SAP
+    sap_ports_to_check:
+      - 3202
+      - 50300
+    # Timeout for port checks (seconds)
+    sap_port_check_timeout_initial: 10
+    sap_port_check_timeout_final: 60
+    sap_port_check_timeout_retry: 120 # Longer timeout for final check after retry
 
   pre_tasks:
     - name: Print a message about the playbook starting
       debug:
-        msg: "Starting system update and reboot process if required..."
+        msg: "Starting system update, reboot, and SAP check process..."
 
     - name: Check connectivity
       ping:
@@ -22,55 +30,48 @@
         msg: "Host {{ inventory_hostname }} is not reachable"
       when: ping_result.failed
 
-    - name: Check if a reboot is required (more robust check) before patching
-      shell: |
-        needs_reboot=$(needs-restarting -r || echo "")
-        if [[ ! -z "$needs_reboot" ]]; then
-          echo "Reboot required"
-        fi
-      register: initial_reboot_check
-      changed_when: initial_reboot_check.stdout | trim == "Reboot required"
-      ignore_errors: true
+    # --- SAP Port Check Before Stopping ---
+    - name: Check if SAP ports {{ sap_ports_to_check }} are listening before stopping services
+      ansible.builtin.wait_for:
+        port: "{{ item }}"
+        state: started
+        timeout: "{{ sap_port_check_timeout_initial }}"
+      loop: "{{ sap_ports_to_check }}"
+      register: initial_sap_ports_check
+      ignore_errors: true # Don't fail the playbook if ports are not up initially
 
-    - name: Set fact if reboot is required before patching
+    - name: Set fact if SAP ports are up initially
       set_fact:
-        reboot_required: "{{ initial_reboot_check.changed }}"
+        sap_ports_up_initial: "{{ initial_sap_ports_check.results | selectattr('failed', 'equalto', false) | list | length == sap_ports_to_check | length }}"
 
-    - name: Display initial reboot status
+    - name: Display initial SAP ports status
       debug:
-        msg: "Reboot required before patching: {{ reboot_required }}"
+        msg: "SAP ports were up before patching: {{ sap_ports_up_initial }}. Services will be stopped only if ports were up."
 
-    - name: Stop services before patching
+    - name: Stop services before patching (Debug message)
       debug:
         msg: "STOPPING SAP services before patching..."
-      when: reboot_required # Note: This stops services only if a reboot was required *before* patching
+      when: sap_ports_up_initial # Only stop if ports were up
 
-    - name: Stop services before patching
+    - name: Stop services before patching (Execute script)
       shell: "{{ script_base_dir }}/stopVAR.sh"
-      loop: "{{ services_to_manage }}"
       register: stopped_services
-      ignore_errors: true
-      when: reboot_required # Note: This stops services only if a reboot was required *before* patching
+      ignore_errors: true # Ignore if the script fails, might be because services weren't running
+      when: sap_ports_up_initial # Only stop if ports were up
 
   tasks:
-    # NOTE: The conditions below (when: reboot_required) mean the upgrade
-    # only runs if a reboot was required *before* patching. This might
-    # not be the intended logic. Usually, you'd run the upgrade
-    # unconditionally or based on a different variable/condition.
-    # However, keeping it as per the original playbook structure for now,
-    # focusing on the patches_exist error fix.
-
+    # --- Patching ---
     - name: Ensure zypper is available
       package:
         name: zypper
         state: present
-      when: reboot_required
+      # Runs unconditionally
 
     - name: Ensure zypper cache is up to date
       command: zypper refresh
       register: refresh_result
       changed_when: refresh_result.rc == 0
-      when: reboot_required
+      # Runs unconditionally
 
     - name: Perform a full system upgrade
       zypper:
@@ -78,45 +79,77 @@
         state: latest
         update_cache: yes
       register: upgrade_result
-      when: reboot_required
+      # Runs unconditionally
 
-    - name: Check if a reboot is required after upgrade
-      shell: |
-        needs_reboot=$(needs-restarting -r || echo "")
-        if [[ ! -z "$needs_reboot" ]]; then
-          echo "Reboot required"
-        fi
-      register: final_reboot_check
-      changed_when: final_reboot_check.stdout | trim == "Reboot required"
-      ignore_errors: true
-      # FIX: Removed 'when: patches_exist'. This check should run after the upgrade.
-
-    - name: Set reboot fact if required (after upgrade)
-      set_fact:
-        reboot_required: "{{ reboot_required or final_reboot_check.changed }}" # Combine initial and final check results
-
-    - name: Display final reboot status
-      debug:
-        msg: "Reboot required after upgrade: {{ reboot_required }}"
-      when: reboot_required # FIX: Changed 'when: patches_exist' to 'when: reboot_required'. Display status if reboot is needed.
-
-    - name: Reboot the server if required
+    # --- Unconditional Reboot ---
+    # Removed checks for 'reboot_required'
+    - name: Reboot the server after upgrade (unconditional)
       reboot:
-        msg: "Rebooting due to system updates"
-      when: reboot_required
+        msg: "Rebooting after system updates"
       register: reboot_result
+      # Runs unconditionally after upgrade tasks
 
   post_tasks:
-    - name: Start services after reboot (or if no reboot was needed)
+    - name: Print a message about post-reboot checks/starts
       debug:
-        msg: "STARTING SAP services after reboot/patching..."
-      when: not reboot_required or (reboot_required and reboot_result.changed)
+        msg: "Starting post-reboot service starts and checks..."
 
-    - name: Start services after reboot (or if no reboot was needed)
+    # --- SAP Service Start Attempt 1 ---
+    # Attempt to start services unconditionally after reboot/patching
+    - name: Attempt to start services after patching/reboot
       shell: "{{ script_base_dir }}/startVAR.sh"
-      loop: "{{ services_to_manage }}"
-      when: not reboot_required or (reboot_required and reboot_result.changed)
+      register: started_services_attempt_1
+      ignore_errors: true # Ignore errors during start attempt itself
+
+    # --- SAP Port Check After Start Attempt 1 ---
+    - name: Wait for SAP ports {{ sap_ports_to_check }} to be listening after first start attempt
+      ansible.builtin.wait_for:
+        port: "{{ item }}"
+        state: started
+        timeout: "{{ sap_port_check_timeout_final }}"
+      loop: "{{ sap_ports_to_check }}"
+      register: final_sap_ports_check_1
+      ignore_errors: true # Don't fail immediately, we might retry
+
+    - name: Set fact if SAP ports are up after first start attempt
+      set_fact:
+        sap_ports_up_final_1: "{{ final_sap_ports_check_1.results | selectattr('failed', 'equalto', false) | list | length == sap_ports_to_check | length }}"
+
+    - name: Display SAP ports status after first start attempt
+      debug:
+        msg: "SAP ports were up after first start attempt: {{ sap_ports_up_final_1 }}"
+
+    # --- SAP Service Start Attempt 2 (Retry if needed) ---
+    - name: Attempt to start services again (retry) if ports are not up
+      shell: "{{ script_base_dir }}/startVAR.sh"
+      register: started_services_attempt_2
+      ignore_errors: true # Ignore errors during retry start attempt
+      when: not sap_ports_up_final_1 # Only retry if ports were NOT up after first attempt
+
+    # --- SAP Port Check After Start Attempt 2 ---
+    - name: Wait for SAP ports {{ sap_ports_to_check }} to be listening after second start attempt
+      ansible.builtin.wait_for:
+        port: "{{ item }}"
+        state: started
+        timeout: "{{ sap_port_check_timeout_retry }}" # Use a longer timeout for the final check
+      loop: "{{ sap_ports_to_check }}"
+      register: final_sap_ports_check_2
+      ignore_errors: true # We will use a fail task instead
+
+    - name: Set fact if SAP ports are up after second start attempt
+      set_fact:
+        sap_ports_up_final_2: "{{ final_sap_ports_check_2.results | selectattr('failed', 'equalto', false) | list | length == sap_ports_to_check | length }}"
+
+    - name: Display SAP ports status after second start attempt
+      debug:
+        msg: "SAP ports were up after second start attempt: {{ sap_ports_up_final_2 }}"
+
+    # --- Final SAP Status Check and Potential Failure ---
+    - name: Final check - Fail if SAP ports are NOT up after all attempts
+      fail:
+        msg: "CRITICAL: SAP ports {{ sap_ports_to_check }} are not listening after patching and service start attempts. Manual intervention required!"
+      when: not sap_ports_up_final_2
 
     - name: Print a message about the playbook ending
       debug:
-        msg: "System update process complete."
+        msg: "System update process complete. Final SAP ports status: {{ 'UP' if sap_ports_up_final_2 else 'DOWN' }}"
