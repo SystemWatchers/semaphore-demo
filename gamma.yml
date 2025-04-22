@@ -22,39 +22,48 @@
         msg: "Host {{ inventory_hostname }} is not reachable"
       when: ping_result.failed
 
-  tasks:
-    - name: Check for patches
-      command: zypper list-patches | grep -v "^#" | grep -i "reboot"
-      register: patches_check
-      changed_when: patches_check.stdout | trim != ""
+    - name: Check if a reboot is required (more robust check)
+      shell: |
+        needs_reboot=$(needs-restarting -r || echo "")
+        if [[ ! -z "$needs_reboot" ]]; then
+          echo "Reboot required"
+        fi
+      register: initial_reboot_check
+      changed_when: initial_reboot_check.stdout | trim == "Reboot required"
       ignore_errors: true
 
-    - name: Set fact if patches are needed
+    - name: Set fact if reboot is required before patching
       set_fact:
-        patches_exist: "{{ patches_check.changed }}"
+        reboot_required: "{{ initial_reboot_check.changed }}"
 
-    - name: Display patch status
+    - name: Display initial reboot status
       debug:
-        msg: "Patches requiring reboot: {{ patches_exist }}"
+        msg: "Reboot required before patching: {{ reboot_required }}"
 
+    - name: Stop services before patching
+      debug:
+        msg: "STOPPING SAP services before patching..."
+      when: reboot_required
+      
     - name: Stop services before patching
       shell: "{{ script_base_dir }}/stopVAR.sh"
       loop: "{{ services_to_manage }}"
       register: stopped_services
       ignore_errors: true
-      when: patches_exist
+      when: reboot_required
 
+  tasks:
     - name: Ensure zypper is available
       package:
         name: zypper
         state: present
-      when: patches_exist
+      when: reboot_required
 
     - name: Ensure zypper cache is up to date
       command: zypper refresh
       register: refresh_result
       changed_when: refresh_result.rc == 0
-      when: patches_exist
+      when: reboot_required
 
     - name: Perform a full system upgrade
       zypper:
@@ -62,36 +71,40 @@
         state: latest
         update_cache: yes
       register: upgrade_result
-      when: patches_exist
+      when: reboot_required
 
-    - name: Check if a reboot is required (more robust check)
+    - name: Check if a reboot is required after upgrade
       shell: |
         needs_reboot=$(needs-restarting -r || echo "")
         if [[ ! -z "$needs_reboot" ]]; then
           echo "Reboot required"
         fi
-      register: reboot_check
-      changed_when: reboot_check.stdout | trim == "Reboot required"
+      register: final_reboot_check
+      changed_when: final_reboot_check.stdout | trim == "Reboot required"
       ignore_errors: true
       when: patches_exist
 
-    - name: Set reboot fact if required
+    - name: Set reboot fact if required (after upgrade)
       set_fact:
-        reboot_required: "{{ reboot_check.changed }}"
-      when: patches_exist
+        reboot_required: "{{ reboot_required or final_reboot_check.changed }}" # Combine
 
-    - name: Display reboot status
+    - name: Display final reboot status
       debug:
-        msg: "Reboot required: {{ reboot_required }}"
+        msg: "Reboot required after upgrade: {{ reboot_required }}"
       when: patches_exist
 
     - name: Reboot the server if required
       reboot:
         msg: "Rebooting due to system updates"
-      when: reboot_required and patches_exist
+      when: reboot_required
       register: reboot_result
 
   post_tasks:
+    - name: Start services after reboot (or if no reboot was needed)
+      debug:
+        msg: "STARTING SAP services after reboot/patching..."
+      when: not reboot_required or (reboot_required and reboot_result.changed)
+      
     - name: Start services after reboot (or if no reboot was needed)
       shell: "{{ script_base_dir }}/startVAR.sh"
       loop: "{{ services_to_manage }}"
