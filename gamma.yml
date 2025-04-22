@@ -1,0 +1,85 @@
+---
+- name: Update SLES server, manage services, and reboot if needed
+  hosts: all
+  become: true
+  become_user: root
+
+  vars:
+    services_to_manage:
+      - serviceA
+      - serviceB
+      - serviceC
+    script_base_dir: "/scripts"  # Define the base directory for your scripts
+
+  pre_tasks:
+    - name: Print a message about the playbook starting
+      debug:
+        msg: "Starting system update and reboot process if required..."
+
+    - name: Check connectivity
+      ping:
+      register: ping_result
+
+    - name: Fail if not reachable
+      fail:
+        msg: "Host {{ inventory_hostname }} is not reachable."
+      when: ping_result.unreachable
+
+  tasks:
+    - name: Stop services before patching
+      shell: "{{ script_base_dir }}/stop_{{ item }}.sh"
+      loop: "{{ services_to_manage }}"
+      register: stopped_services
+      ignore_errors: true
+      #changed_when: stopped_services.rc != 0 #makes it run.
+
+    - name: Ensure zypper is available
+      package:
+        name: zypper
+        state: present
+
+    - name: Ensure zypper cache is up to date
+      command: zypper refresh
+      register: refresh_result
+      changed_when: refresh_result.rc == 0
+
+    - name: Perform a full system upgrade
+      zypper:
+        name: '*'
+        state: latest
+        update_cache: yes
+      register: upgrade_result
+
+    - name: Check if a reboot is required (more robust check)
+      shell: |
+        needs_reboot=$(needs-restarting -r || echo "")
+        if [[ ! -z "$needs_reboot" ]]; then
+          echo "Reboot required"
+        fi
+      register: reboot_check
+      changed_when: reboot_check.stdout | trim == "Reboot required"
+      ignore_errors: true
+
+    - name: Set reboot fact if required
+      set_fact:
+        reboot_required: "{{ reboot_check.changed }}"
+
+    - name: Display reboot status
+      debug:
+        msg: "Reboot required: {{ reboot_required }}"
+
+    - name: Reboot the server if required
+      reboot:
+        msg: "Rebooting due to system updates"
+      when: reboot_required
+      register: reboot_result #capture the result
+
+  post_tasks:
+    - name: Start services after reboot (or if no reboot was needed)
+      shell: "{{ script_base_dir }}/start_{{ item }}.sh"
+      loop: "{{ services_to_manage }}"
+      when: not reboot_required or (reboot_required and reboot_result.changed)
+
+    - name: Print a message about the playbook ending
+      debug:
+        msg: "System update process complete."
